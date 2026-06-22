@@ -128,12 +128,18 @@ function startPolling() {
 
   // Clear existing timer
   if (pollTimer) {
-    clearInterval(pollTimer)
+    clearTimeout(pollTimer)
+    pollTimer = null
   }
 
-  // Fetch immediately, then poll
-  fetchStats()
-  pollTimer = setInterval(fetchStats, POLL_INTERVAL)
+  // Fetch immediately, then schedule next poll after completion
+  poll()
+}
+
+async function poll() {
+  await fetchStats()
+  // Schedule next poll only after current request completes (no stacking)
+  pollTimer = setTimeout(poll, POLL_INTERVAL)
 }
 
 async function fetchStats() {
@@ -164,7 +170,7 @@ async function fetchStats() {
 
 onUnmounted(() => {
   if (pollTimer) {
-    clearInterval(pollTimer)
+    clearTimeout(pollTimer)
   }
 })
 </script>
