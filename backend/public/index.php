@@ -19,6 +19,7 @@ header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 header('Content-Type: application/json');
+header('Connection: close');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -28,6 +29,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 // Simple router
 $method = $_SERVER['REQUEST_METHOD'];
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+
+// Strip the script directory prefix so routing works under any subdirectory
+$scriptDir = dirname($_SERVER['SCRIPT_NAME']);
+if ($scriptDir !== '/' && $scriptDir !== '\\') {
+    $uri = substr($uri, strlen($scriptDir)) ?: '/';
+}
 
 // Remove trailing slash
 $uri = rtrim($uri, '/');

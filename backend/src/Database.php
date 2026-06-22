@@ -19,7 +19,7 @@ class Database
             $port = getenv('DB_PORT') ?: '3306';
             $name = getenv('DB_NAME') ?: 'email_analytics';
             $user = getenv('DB_USER') ?: 'root';
-            $pass = getenv('DB_PASS') ?: 'password';
+            $pass = getenv('DB_PASS') !== false ? getenv('DB_PASS') : '';
 
             $dsn = "mysql:host={$host};port={$port};dbname={$name};charset=utf8mb4";
 
