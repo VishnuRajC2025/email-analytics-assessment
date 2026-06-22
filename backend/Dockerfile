@@ -8,4 +8,4 @@ COPY . /app
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "php migrate.php && php -S 0.0.0.0:8080 -t public"]
+CMD ["sh", "-c", "php migrate.php && php -S 0.0.0.0:8080 -t public public/router.php"]
