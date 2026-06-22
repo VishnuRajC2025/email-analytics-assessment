@@ -1,0 +1,21 @@
+# Dependencies
+frontend/node_modules/
+vendor/
+
+# Build output
+frontend/dist/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+mysql_data/
