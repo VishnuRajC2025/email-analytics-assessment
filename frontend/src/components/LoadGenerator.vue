@@ -8,11 +8,15 @@
       </div>
       <div class="field">
         <label for="gen-count">Event Count:</label>
-        <input id="gen-count" v-model.number="eventCount" type="number" min="1" max="100000" />
+        <input id="gen-count" v-model.number="eventCount" type="number" min="1" max="1000000" />
+      </div>
+      <div class="field">
+        <label for="gen-batch">Batch Size:</label>
+        <input id="gen-batch" v-model.number="batchSize" type="number" min="1" max="1000" />
       </div>
       <div class="field">
         <label for="gen-concurrency">Concurrency:</label>
-        <input id="gen-concurrency" v-model.number="concurrency" type="number" min="1" max="100" />
+        <input id="gen-concurrency" v-model.number="concurrency" type="number" min="1" max="50" />
       </div>
       <button @click="startGeneration" :disabled="isRunning">
         {{ isRunning ? 'Sending...' : 'Fire Events' }}
@@ -24,9 +28,9 @@
         <div class="progress-fill" :style="{ width: progressPercent + '%' }"></div>
       </div>
       <p>
-        {{ progress.sent }} / {{ progress.total }} sent
+        {{ progress.sent.toLocaleString() }} / {{ progress.total.toLocaleString() }} sent
         <span v-if="progress.errors > 0" class="error-count">({{ progress.errors }} errors)</span>
-        <span v-if="!isRunning && progress.sent === progress.total"> — Done! {{ elapsedTime }}ms</span>
+        <span v-if="!isRunning && progress.sent >= progress.total"> — Done! {{ elapsedTime }}ms ({{ eventsPerSec }} events/sec)</span>
       </p>
     </div>
   </div>
@@ -42,8 +46,9 @@ const props = defineProps({
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
 const genCampaignId = ref(props.campaignId || 'camp-1')
-const eventCount = ref(100)
-const concurrency = ref(10)
+const eventCount = ref(5000)
+const batchSize = ref(500)
+const concurrency = ref(5)
 const isRunning = ref(false)
 const startTime = ref(0)
 const endTime = ref(0)
@@ -59,40 +64,51 @@ const elapsedTime = computed(() => {
   return endTime.value - startTime.value
 })
 
+const eventsPerSec = computed(() => {
+  if (!elapsedTime.value) return 0
+  return Math.round((progress.value.sent / elapsedTime.value) * 1000)
+})
+
 const EVENT_TYPES = ['sent', 'opened', 'clicked', 'bounced']
 
-function generateEventId() {
-  return `evt-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`
+function generateBatch(campaignId, startIndex, size) {
+  const events = []
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+  for (let i = 0; i < size; i++) {
+    events.push({
+      event_id: `evt-${Date.now()}-${startIndex + i}-${Math.random().toString(36).substring(2, 8)}`,
+      campaign_id: campaignId,
+      type: EVENT_TYPES[(startIndex + i) % 4],
+      timestamp: now
+    })
+  }
+  return events
 }
 
-async function sendEvent(campaignId, index) {
-  const event = {
-    event_id: generateEventId(),
-    campaign_id: campaignId,
-    type: EVENT_TYPES[index % EVENT_TYPES.length],
-    timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-  }
+async function sendBatch(campaignId, startIndex, size) {
+  const events = generateBatch(campaignId, startIndex, size)
 
   try {
-    const response = await fetch(`${API_BASE}/events`, {
+    const response = await fetch(`${API_BASE}/events/batch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(event)
+      body: JSON.stringify({ events })
     })
 
     if (!response.ok) {
-      progress.value.errors++
+      progress.value.errors += size
+    } else {
+      progress.value.sent += size
     }
   } catch {
-    progress.value.errors++
+    progress.value.errors += size
   }
-
-  progress.value.sent++
 }
 
 async function startGeneration() {
   const campaign = genCampaignId.value.trim() || 'camp-1'
   const total = eventCount.value
+  const batch = Math.min(batchSize.value, 1000)
   const conc = concurrency.value
 
   isRunning.value = true
@@ -100,18 +116,23 @@ async function startGeneration() {
   endTime.value = 0
   progress.value = { total, sent: 0, errors: 0 }
 
-  // Send events in batches with controlled concurrency
-  const queue = Array.from({ length: total }, (_, i) => i)
+  // Build queue of batch jobs
+  const batches = []
+  for (let i = 0; i < total; i += batch) {
+    const size = Math.min(batch, total - i)
+    batches.push({ startIndex: i, size })
+  }
 
+  // Workers pull batches from queue
   async function worker() {
-    while (queue.length > 0) {
-      const index = queue.shift()
-      if (index === undefined) break
-      await sendEvent(campaign, index)
+    while (batches.length > 0) {
+      const job = batches.shift()
+      if (!job) break
+      await sendBatch(campaign, job.startIndex, job.size)
     }
   }
 
-  const workers = Array.from({ length: Math.min(conc, total) }, () => worker())
+  const workers = Array.from({ length: Math.min(conc, batches.length) }, () => worker())
   await Promise.all(workers)
 
   endTime.value = Date.now()
@@ -155,11 +176,11 @@ async function startGeneration() {
   padding: 0.4rem 0.6rem;
   border: 1px solid #ddd;
   border-radius: 4px;
-  width: 120px;
+  width: 100px;
 }
 
 .field input[type="text"] {
-  width: 150px;
+  width: 130px;
 }
 
 .controls button {

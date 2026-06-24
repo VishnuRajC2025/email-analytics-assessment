@@ -12,6 +12,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../src/Database.php';
 require_once __DIR__ . '/../src/EventController.php';
+require_once __DIR__ . '/../src/BatchEventController.php';
 require_once __DIR__ . '/../src/StatsController.php';
 
 // CORS headers for frontend access
@@ -43,6 +44,13 @@ try {
     // POST /events
     if ($method === 'POST' && $uri === '/events') {
         $controller = new EventController();
+        $controller->handlePost();
+        exit;
+    }
+
+    // POST /events/batch — high-throughput batch ingestion
+    if ($method === 'POST' && $uri === '/events/batch') {
+        $controller = new BatchEventController();
         $controller->handlePost();
         exit;
     }

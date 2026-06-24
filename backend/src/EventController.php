@@ -2,12 +2,7 @@
 
 declare(strict_types=1);
 
-/**
- * Handles POST /events
- * 
- * Ingests engagement events with idempotency via INSERT IGNORE.
- * Duplicate event_id values are silently discarded (never double-counted).
- */
+
 class EventController
 {
     private const VALID_TYPES = ['sent', 'opened', 'clicked', 'bounced'];

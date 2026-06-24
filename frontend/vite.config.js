@@ -6,8 +6,9 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/events': 'http://localhost:8080',
-      '/campaigns': 'http://localhost:8080',
-    }
+  '/events': 'http://localhost/email-analytics/public',
+  '/campaigns': 'http://localhost/email-analytics/public',
+}
+
   }
 })
