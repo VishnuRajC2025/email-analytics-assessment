@@ -2,6 +2,12 @@
 
 declare(strict_types=1);
 
+/**
+ * Handles POST /events/batch
+ * 
+ * FAST PATH: Validates events, writes batch to queue, responds immediately.
+ * The API NEVER waits for MySQL — that happens in the background worker.
+ */
 class BatchEventController
 {
     private const VALID_TYPES = ['sent', 'opened', 'clicked', 'bounced'];
@@ -18,7 +24,6 @@ class BatchEventController
             return;
         }
 
-
         $events = $data['events'];
 
         if (count($events) === 0) {
@@ -33,23 +38,20 @@ class BatchEventController
             return;
         }
 
-        // Validate all events first
-        $rows = [];
-        foreach ($events as $i => $event) {
+        // Validate all events
+        $validEvents = [];
+        foreach ($events as $event) {
             if (!is_array($event)) continue;
 
-            // Check required fields
             if (empty($event['event_id']) || empty($event['campaign_id']) || 
                 empty($event['type']) || empty($event['timestamp'])) {
-                continue; // Skip invalid events
+                continue;
             }
 
-            // Check type
             if (!in_array($event['type'], self::VALID_TYPES, true)) {
                 continue;
             }
 
-            // Parse timestamp
             $ts = \DateTimeImmutable::createFromFormat(\DateTimeInterface::RFC3339, $event['timestamp']);
             if ($ts === false) {
                 $ts = \DateTimeImmutable::createFromFormat('Y-m-d\TH:i:s\Z', $event['timestamp'], new \DateTimeZone('UTC'));
@@ -58,75 +60,29 @@ class BatchEventController
                 continue;
             }
 
-            $rows[] = [
-                $event['event_id'],
-                $event['campaign_id'],
-                $event['type'],
-                $ts->format('Y-m-d H:i:s'),
+            $validEvents[] = [
+                'event_id'    => $event['event_id'],
+                'campaign_id' => $event['campaign_id'],
+                'type'        => $event['type'],
+                'timestamp'   => $ts->format('Y-m-d H:i:s'),
             ];
         }
 
-        if (empty($rows)) {
+        if (empty($validEvents)) {
             http_response_code(400);
             echo json_encode(['error' => 'No valid events in batch']);
             return;
         }
 
-        try {
-            $pdo = Database::getConnection();
+        // Write to queue — NO DATABASE CALL, responds instantly
+        $queue = new QueueService();
+        $queue->enqueue($validEvents);
 
-            // Build multi-row INSERT IGNORE for maximum throughput
-            $placeholders = implode(',', array_fill(0, count($rows), '(?,?,?,?)'));
-            $sql = "INSERT IGNORE INTO events (event_id, campaign_id, type, timestamp) VALUES {$placeholders}";
-
-            $params = [];
-            foreach ($rows as $row) {
-                $params = array_merge($params, $row);
-            }
-
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute($params);
-
-            $insertedCount = $stmt->rowCount();
-
-            // Update pre-calculated counters for each campaign+type combination
-            // Count how many of each type were in this batch
-            if ($insertedCount > 0) {
-                $counters = []; // ['camp-1' => ['sent' => 5, 'opened' => 3], ...]
-                foreach ($rows as $row) {
-                    $cid = $row[1];  // campaign_id
-                    $type = $row[2]; // type
-                    if (!isset($counters[$cid])) {
-                        $counters[$cid] = ['sent' => 0, 'opened' => 0, 'clicked' => 0, 'bounced' => 0];
-                    }
-                    $counters[$cid][$type]++;
-                }
-
-                // Update campaign_stats for each campaign
-                foreach ($counters as $cid => $counts) {
-                    $stmt = $pdo->prepare(
-                        "INSERT INTO campaign_stats (campaign_id, sent, opened, clicked, bounced) 
-                         VALUES (?, ?, ?, ?, ?)
-                         ON DUPLICATE KEY UPDATE 
-                         
-                            sent = sent + VALUES(sent),
-                            opened = opened + VALUES(opened),
-                            clicked = clicked + VALUES(clicked),
-                            bounced = bounced + VALUES(bounced)"
-                    );
-                    $stmt->execute([$cid, $counts['sent'], $counts['opened'], $counts['clicked'], $counts['bounced']]);
-                }
-            }
-
-            http_response_code(201);
-            echo json_encode([
-                'status' => 'accepted',
-                'received' => count($rows),
-            ]);
-        } catch (\PDOException $e) {
-            error_log('Database error in POST /events/batch: ' . $e->getMessage());
-            http_response_code(500);
-            echo json_encode(['error' => 'Internal server error']);
-        }
+        // Respond immediately — client doesn't wait for DB
+        http_response_code(202); // 202 = Accepted (queued for processing)
+        echo json_encode([
+            'status'   => 'queued',
+            'received' => count($validEvents),
+        ]);
     }
 }

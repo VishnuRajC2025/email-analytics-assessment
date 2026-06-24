@@ -35,10 +35,9 @@ class EventController
             return;
         }
 
-        // Validate and parse timestamp (RFC3339 / ISO8601)
+        // Validate timestamp format
         $ts = \DateTimeImmutable::createFromFormat(\DateTimeInterface::RFC3339, $data['timestamp']);
         if ($ts === false) {
-            // Try ISO8601 variant without timezone offset (Z suffix)
             $ts = \DateTimeImmutable::createFromFormat('Y-m-d\TH:i:s\Z', $data['timestamp'], new \DateTimeZone('UTC'));
         }
         if ($ts === false) {
@@ -47,39 +46,17 @@ class EventController
             return;
         }
 
-        $mysqlTimestamp = $ts->format('Y-m-d H:i:s');
+        // Write to queue — NO DATABASE CALL, responds instantly
+        $queue = new QueueService();
+        $queue->enqueue([[
+            'event_id'    => $data['event_id'],
+            'campaign_id' => $data['campaign_id'],
+            'type'        => $data['type'],
+            'timestamp'   => $ts->format('Y-m-d H:i:s'),
+        ]]);
 
-        try {
-            $pdo = Database::getConnection();
-
-            // INSERT IGNORE: if event_id already exists (PRIMARY KEY), the row is silently skipped.
-            // This guarantees idempotency — the same event is never counted twice.
-            $stmt = $pdo->prepare(
-                "INSERT IGNORE INTO events (event_id, campaign_id, type, timestamp) VALUES (?, ?, ?, ?)"
-            );
-            $stmt->execute([
-                $data['event_id'],
-                $data['campaign_id'],
-                $data['type'],
-                $mysqlTimestamp,
-            ]);
-
-            // If a row was actually inserted (not a duplicate), update the counter
-            if ($stmt->rowCount() > 0) {
-                $type = $data['type'];
-                $counterStmt = $pdo->prepare(
-                    "INSERT INTO campaign_stats (campaign_id, {$type}) VALUES (?, 1)
-                     ON DUPLICATE KEY UPDATE {$type} = {$type} + 1"
-                );
-                $counterStmt->execute([$data['campaign_id']]);
-            }
-
-            http_response_code(201);
-            echo json_encode(['status' => 'accepted']);
-        } catch (\PDOException $e) {
-            error_log('Database error in POST /events: ' . $e->getMessage());
-            http_response_code(500);
-            echo json_encode(['error' => 'Internal server error']);
-        }
+        // Respond immediately — client doesn't wait for DB
+        http_response_code(202); // 202 = Accepted (queued for processing)
+        echo json_encode(['status' => 'queued']);
     }
 }

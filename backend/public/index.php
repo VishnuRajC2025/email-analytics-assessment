@@ -11,6 +11,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../src/Database.php';
+require_once __DIR__ . '/../src/QueueService.php';
 require_once __DIR__ . '/../src/EventController.php';
 require_once __DIR__ . '/../src/BatchEventController.php';
 require_once __DIR__ . '/../src/StatsController.php';
