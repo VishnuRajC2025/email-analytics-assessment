@@ -18,6 +18,7 @@ class BatchEventController
             return;
         }
 
+
         $events = $data['events'];
 
         if (count($events) === 0) {
@@ -75,7 +76,6 @@ class BatchEventController
             $pdo = Database::getConnection();
 
             // Build multi-row INSERT IGNORE for maximum throughput
-            // INSERT IGNORE INTO events (...) VALUES (?,?,?,?), (?,?,?,?), ...
             $placeholders = implode(',', array_fill(0, count($rows), '(?,?,?,?)'));
             $sql = "INSERT IGNORE INTO events (event_id, campaign_id, type, timestamp) VALUES {$placeholders}";
 
@@ -86,6 +86,37 @@ class BatchEventController
 
             $stmt = $pdo->prepare($sql);
             $stmt->execute($params);
+
+            $insertedCount = $stmt->rowCount();
+
+            // Update pre-calculated counters for each campaign+type combination
+            // Count how many of each type were in this batch
+            if ($insertedCount > 0) {
+                $counters = []; // ['camp-1' => ['sent' => 5, 'opened' => 3], ...]
+                foreach ($rows as $row) {
+                    $cid = $row[1];  // campaign_id
+                    $type = $row[2]; // type
+                    if (!isset($counters[$cid])) {
+                        $counters[$cid] = ['sent' => 0, 'opened' => 0, 'clicked' => 0, 'bounced' => 0];
+                    }
+                    $counters[$cid][$type]++;
+                }
+
+                // Update campaign_stats for each campaign
+                foreach ($counters as $cid => $counts) {
+                    $stmt = $pdo->prepare(
+                        "INSERT INTO campaign_stats (campaign_id, sent, opened, clicked, bounced) 
+                         VALUES (?, ?, ?, ?, ?)
+                         ON DUPLICATE KEY UPDATE 
+                         
+                            sent = sent + VALUES(sent),
+                            opened = opened + VALUES(opened),
+                            clicked = clicked + VALUES(clicked),
+                            bounced = bounced + VALUES(bounced)"
+                    );
+                    $stmt->execute([$cid, $counts['sent'], $counts['opened'], $counts['clicked'], $counts['bounced']]);
+                }
+            }
 
             http_response_code(201);
             echo json_encode([

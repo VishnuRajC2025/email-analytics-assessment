@@ -64,6 +64,16 @@ class EventController
                 $mysqlTimestamp,
             ]);
 
+            // If a row was actually inserted (not a duplicate), update the counter
+            if ($stmt->rowCount() > 0) {
+                $type = $data['type'];
+                $counterStmt = $pdo->prepare(
+                    "INSERT INTO campaign_stats (campaign_id, {$type}) VALUES (?, 1)
+                     ON DUPLICATE KEY UPDATE {$type} = {$type} + 1"
+                );
+                $counterStmt->execute([$data['campaign_id']]);
+            }
+
             http_response_code(201);
             echo json_encode(['status' => 'accepted']);
         } catch (\PDOException $e) {

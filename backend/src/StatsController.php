@@ -21,22 +21,32 @@ class StatsController
         try {
             $pdo = Database::getConnection();
 
+            // Read from pre-calculated counters table (instant — one row lookup)
+            // Instead of counting millions of rows every time
             $stmt = $pdo->prepare(
-                "SELECT type, COUNT(*) as cnt FROM events WHERE campaign_id = ? GROUP BY type"
+                "SELECT sent, opened, clicked, bounced FROM campaign_stats WHERE campaign_id = ?"
             );
             $stmt->execute([$campaignId]);
 
-            $stats = [
-                'sent'    => 0,
-                'opened'  => 0,
-                'clicked' => 0,
-                'bounced' => 0,
-            ];
+            $row = $stmt->fetch();
 
-            while ($row = $stmt->fetch()) {
-                if (isset($stats[$row['type']])) {
-                    $stats[$row['type']] = (int) $row['cnt'];
-                }
+            if ($row) {
+                $stats = [
+                    'sent'    => (int) $row['sent'],
+                    'opened'  => (int) $row['opened'],
+                    'clicked' => (int) $row['clicked'],
+                    'bounced' => (int) $row['bounced'],
+                ];
+            } else {
+           
+                    
+                // Campaign has no events yet
+                $stats = [
+                    'sent'    => 0,
+                    'opened'  => 0,
+                    'clicked' => 0,
+                    'bounced' => 0,
+                ];
             }
 
             http_response_code(200);
