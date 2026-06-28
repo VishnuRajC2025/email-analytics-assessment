@@ -2,75 +2,71 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use longlang\phpkafka\Producer\Producer;
+use longlang\phpkafka\Producer\ProducerConfig;
+use longlang\phpkafka\Consumer\Consumer;
+use longlang\phpkafka\Consumer\ConsumerConfig;
+
 /**
- * Simple file-based queue (simulates Kafka/RabbitMQ behavior).
+ * Kafka-based queue service.
  * 
- * How it works:
- * - API writes events to queue files (instant, no DB wait)
- * - Background worker reads queue files and batch-inserts into MySQL
+ * Uses Apache Kafka for durable, high-throughput event streaming.
+ * - Producer: API writes events to Kafka topic (instant, no DB wait)
+ * - Consumer: Background worker reads from Kafka and batch-inserts into MySQL
  * 
- * This decouples the API from the database:
- * - API responds in <1ms (just a file write)
- * - DB work happens asynchronously in the background worker
- * 
- * In production, replace this with Kafka/RabbitMQ for durability and distribution.
+ * Kafka guarantees:
+ * - Messages are durable (written to disk, replicated in production)
+ * - Order is preserved within a partition
+ * - At-least-once delivery (consumer commits offset after processing)
  */
 class QueueService
 {
-    private string $queueDir;
-
-    public function __construct()
-    {
-        $this->queueDir = __DIR__ . '/../queue';
-        if (!is_dir($this->queueDir)) {
-            mkdir($this->queueDir, 0777, true);
-        }
-    }
+    private const TOPIC = 'email-events';
+    private const BROKER = 'localhost:9092';
 
     /**
-     * Enqueue events — writes to a file (instant, no DB involved).
-     * Each file contains one batch of events as JSON.
+     * Produce (enqueue) events to Kafka topic.
+     * This is what the API calls — instant, no DB involved.
      */
     public function enqueue(array $events): void
     {
-        // Unique filename: timestamp + random to avoid collisions
-        $filename = sprintf(
-            '%s/%s_%s.json',
-            $this->queueDir,
-            microtime(true) * 10000,
-            bin2hex(random_bytes(4))
-        );
+        $config = new ProducerConfig();
+        $config->setBootstrapServers(self::BROKER);
+        $config->setAcks(-1); // Wait for all replicas to acknowledge (safest)
 
-        file_put_contents($filename, json_encode($events), LOCK_EX);
+        $producer = new Producer($config);
+        $producer->send(self::TOPIC, json_encode($events));
+        $producer->close();
     }
 
     /**
-     * Dequeue — reads and deletes the oldest batch file.
-     * Returns array of events, or null if queue is empty.
+     * Consume (dequeue) events from Kafka topic.
+     * Returns array of events, or null if no messages available.
+     * This is what the worker calls.
      */
     public function dequeue(): ?array
     {
-        $files = glob($this->queueDir . '/*.json');
-        if (empty($files)) {
+        $config = new ConsumerConfig();
+        $config->setBootstrapServers(self::BROKER);
+        $config->setGroupId('event-worker');
+        $config->setTopic(self::TOPIC);
+        $config->setAutoCommit(false);
+        $config->setInterval(0.1); // 100ms poll interval
+
+        $consumer = new Consumer($config);
+        $message = $consumer->consume();
+
+        if ($message === null) {
+            $consumer->close();
             return null;
         }
 
-        // Sort by filename (oldest first since filenames are timestamp-based)
-        sort($files);
-        $file = $files[0];
+        $events = json_decode($message->getValue(), true);
+        $consumer->ack($message); // Commit offset — message won't be redelivered
+        $consumer->close();
 
-        $content = file_get_contents($file);
-        unlink($file); // Remove from queue after reading
-
-        return json_decode($content, true);
-    }
-
-    /**
-     * Get number of pending files in the queue.
-     */
-    public function size(): int
-    {
-        $files = glob($this->queueDir . '/*.json');
-        return count($files);
+        return $events;
     }
 }
