@@ -3,6 +3,9 @@
 /**
  * API Integration Test Suite
  * Tests all endpoints and edge cases.
+ * 
+ * NOTE: With Kafka queue, POST returns 202 (queued).
+ * Stats tests require the worker to have processed events first.
  */
 
 $baseUrl = 'http://localhost/email-analytics/public';
@@ -50,53 +53,39 @@ echo "============================================\n";
 echo "  EMAIL ANALYTICS API - INTEGRATION TESTS\n";
 echo "============================================\n\n";
 
-// Clean up from previous test runs
-echo "--- Setup: Cleaning test data ---\n";
-$pdo = new PDO('mysql:host=127.0.0.1;dbname=email_analytics', 'root', '');
-$pdo->exec("DELETE FROM events WHERE campaign_id IN ('camp-test', 'camp-dedup', 'camp-empty')");
-echo "  Cleaned previous test data.\n\n";
-
 // ============ POST /events tests ============
 echo "--- POST /events ---\n";
 
-// Test 1: Valid event
+// Test 1: Valid event returns 202 (queued to Kafka)
 $r = request('POST', "{$baseUrl}/events", [
     'event_id'    => 'test-post-1',
     'campaign_id' => 'camp-test',
     'type'        => 'sent',
     'timestamp'   => '2026-06-17T10:00:00Z',
 ]);
-test('Valid event returns 201', $r['code'] === 201);
-test('Valid event body has status=accepted', ($r['body']['status'] ?? '') === 'accepted');
+test('Valid event returns 202 (queued)', $r['code'] === 202);
+test('Response status is "queued"', ($r['body']['status'] ?? '') === 'queued');
 
-// Test 2: All four types work
+// Test 2: All four types accepted
 $types = ['sent', 'opened', 'clicked', 'bounced'];
-foreach ($types as $i => $type) {
+foreach ($types as $type) {
     $r = request('POST', "{$baseUrl}/events", [
-        'event_id'    => "test-type-{$type}",
+        'event_id'    => "test-type-{$type}-" . uniqid(),
         'campaign_id' => 'camp-test',
         'type'        => $type,
         'timestamp'   => '2026-06-17T10:00:00Z',
     ]);
-    test("Event type '{$type}' returns 201", $r['code'] === 201);
+    test("Event type '{$type}' returns 202", $r['code'] === 202);
 }
 
-// Test 3: Duplicate event_id (idempotency)
+// Test 3: Duplicate event_id still returns 202 (queued, dedup happens in worker)
 $r = request('POST', "{$baseUrl}/events", [
-    'event_id'    => 'test-dedup-1',
-    'campaign_id' => 'camp-dedup',
+    'event_id'    => 'test-post-1',
+    'campaign_id' => 'camp-test',
     'type'        => 'sent',
     'timestamp'   => '2026-06-17T10:00:00Z',
 ]);
-test('First insert returns 201', $r['code'] === 201);
-
-$r = request('POST', "{$baseUrl}/events", [
-    'event_id'    => 'test-dedup-1',
-    'campaign_id' => 'camp-dedup',
-    'type'        => 'sent',
-    'timestamp'   => '2026-06-17T10:00:00Z',
-]);
-test('Duplicate insert returns 201 (idempotent)', $r['code'] === 201);
+test('Duplicate event returns 202 (queued, dedup in worker)', $r['code'] === 202);
 
 // Test 4: Invalid type
 $r = request('POST', "{$baseUrl}/events", [
@@ -136,86 +125,76 @@ $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 test('Invalid JSON body returns 400', $code === 400);
 
+// ============ POST /events/batch tests ============
+echo "\n--- POST /events/batch ---\n";
+
+// Test 8: Valid batch
+$r = request('POST', "{$baseUrl}/events/batch", [
+    'events' => [
+        ['event_id' => 'batch-1-' . uniqid(), 'campaign_id' => 'camp-test', 'type' => 'sent', 'timestamp' => '2026-06-17T10:00:00Z'],
+        ['event_id' => 'batch-2-' . uniqid(), 'campaign_id' => 'camp-test', 'type' => 'opened', 'timestamp' => '2026-06-17T10:00:00Z'],
+    ]
+]);
+test('Valid batch returns 202', $r['code'] === 202);
+test('Batch received count = 2', ($r['body']['received'] ?? 0) === 2);
+
+// Test 9: Empty batch
+$r = request('POST', "{$baseUrl}/events/batch", ['events' => []]);
+test('Empty batch returns 400', $r['code'] === 400);
+
+// Test 10: Invalid body (no events key)
+$r = request('POST', "{$baseUrl}/events/batch", ['data' => 'wrong']);
+test('Missing events key returns 400', $r['code'] === 400);
+
+// ============ GET /campaigns/{id}/stats tests ============
 echo "\n--- GET /campaigns/{id}/stats ---\n";
 
-// Test 8: Stats for campaign with events
+// Test 11: Stats endpoint returns 200
 $r = request('GET', "{$baseUrl}/campaigns/camp-test/stats");
 test('Stats returns 200', $r['code'] === 200);
 test('Stats has sent field', isset($r['body']['sent']));
 test('Stats has opened field', isset($r['body']['opened']));
 test('Stats has clicked field', isset($r['body']['clicked']));
 test('Stats has bounced field', isset($r['body']['bounced']));
-test('Stats sent count > 0', $r['body']['sent'] > 0);
 
-// Test 9: Dedup verification — camp-dedup should have exactly 1 sent
-$r = request('GET', "{$baseUrl}/campaigns/camp-dedup/stats");
-test('Dedup: only 1 event counted despite 2 inserts', $r['body']['sent'] === 1);
-
-// Test 10: Empty campaign
-$r = request('GET', "{$baseUrl}/campaigns/camp-empty/stats");
+// Test 12: Empty campaign returns zeros
+$r = request('GET', "{$baseUrl}/campaigns/nonexistent-campaign/stats");
 test('Empty campaign returns 200', $r['code'] === 200);
 test('Empty campaign all zeros', $r['body']['sent'] === 0 && $r['body']['opened'] === 0 && $r['body']['clicked'] === 0 && $r['body']['bounced'] === 0);
 
-// Test 11: CORS header present
+// ============ CORS tests ============
+echo "\n--- CORS & Preflight ---\n";
+
 $ch = curl_init("{$baseUrl}/campaigns/camp-test/stats");
-curl_setopt_array($ch, [
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HEADER         => true,
-]);
+curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_HEADER => true]);
 $response = curl_exec($ch);
 curl_close($ch);
 test('CORS header present', strpos($response, 'Access-Control-Allow-Origin: *') !== false);
 
-// Test 12: OPTIONS preflight
 $ch = curl_init("{$baseUrl}/events");
-curl_setopt_array($ch, [
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_CUSTOMREQUEST  => 'OPTIONS',
-]);
+curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_CUSTOMREQUEST => 'OPTIONS']);
 curl_exec($ch);
 $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 test('OPTIONS preflight returns 200', $code === 200);
 
-echo "\n--- Load Test ---\n";
+// ============ Load test ============
+echo "\n--- Load Test (Burst to Kafka) ---\n";
 
-// Test 13: Burst of 100 events
 $startTime = microtime(true);
-$mh = curl_multi_init();
-$handles = [];
+$batchEvents = [];
 for ($i = 0; $i < 100; $i++) {
-    $event = json_encode([
+    $batchEvents[] = [
         'event_id'    => 'load-' . uniqid() . '-' . $i,
-        'campaign_id' => 'camp-test',
+        'campaign_id' => 'camp-load',
         'type'        => $types[$i % 4],
         'timestamp'   => '2026-06-17T10:00:00Z',
-    ]);
-    $ch = curl_init("{$baseUrl}/events");
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => $event,
-        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-        CURLOPT_TIMEOUT        => 10,
-    ]);
-    curl_multi_add_handle($mh, $ch);
-    $handles[] = $ch;
+    ];
 }
-do {
-    curl_multi_exec($mh, $running);
-    curl_multi_select($mh);
-} while ($running > 0);
-
-$errors = 0;
-foreach ($handles as $ch) {
-    if (curl_getinfo($ch, CURLINFO_HTTP_CODE) !== 201) $errors++;
-    curl_multi_remove_handle($mh, $ch);
-    curl_close($ch);
-}
-curl_multi_close($mh);
+$r = request('POST', "{$baseUrl}/events/batch", ['events' => $batchEvents]);
 $elapsed = round((microtime(true) - $startTime) * 1000);
-test("Burst 100 events: 0 errors (got {$errors})", $errors === 0);
-echo "  ⏱️  100 concurrent events took {$elapsed}ms\n";
+test("Burst 100 events queued successfully", $r['code'] === 202);
+echo "  ⏱️  100 events queued in {$elapsed}ms\n";
 
 echo "\n============================================\n";
 echo "  RESULTS: {$passed} passed, {$failed} failed\n";

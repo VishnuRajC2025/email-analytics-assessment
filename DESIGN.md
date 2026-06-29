@@ -2,7 +2,21 @@
 
 ## Overview
 
-A service that ingests engagement events at high volume and exposes a stats endpoint for a live dashboard. Built with PHP 8.2, MySQL 8.0, and Vue 3.
+A service that ingests engagement events at high volume and exposes a stats endpoint for a live dashboard. Built with PHP 8.2, Apache Kafka, MySQL 8.0, and Vue 3.
+
+### Architecture
+
+```
+Client → API (validates + produces to Kafka) → responds instantly (202)
+                     ↓
+         Kafka topic "email-events" (durable message store)
+                     ↓
+         Worker (consumes from Kafka → batch INSERT IGNORE → update counters)
+                     ↓
+         MySQL (events table + campaign_stats table)
+                     ↓
+         Dashboard (polls campaign_stats every 5s → shows live numbers)
+```
 
 ---
 
