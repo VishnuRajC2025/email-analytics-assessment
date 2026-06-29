@@ -24,28 +24,32 @@ use longlang\phpkafka\Consumer\ConsumerConfig;
 class QueueService
 {
     private const TOPIC = 'email-events';
-    private const BROKER = 'localhost:9092';
+    private const BROKER = 'localhost:29092';
 
     /**
      * Produce (enqueue) events to Kafka topic.
-     * This is what the API calls — instant, no DB involved.
+     * Sends all events in a single producer session for maximum throughput.
      */
     public function enqueue(array $events): void
     {
         $config = new ProducerConfig();
         $config->setBootstrapServers(self::BROKER);
-        $config->setAcks(-1); // Wait for all replicas to acknowledge (safest)
+        $config->setAcks(1); // Leader ack only (faster than -1 for high throughput)
 
         $producer = new Producer($config);
-        $producer->send(self::TOPIC, json_encode($events));
+
+        // Send all events in one session (reuses connection)
+        foreach ($events as $event) {
+            if (isset($event['timestamp']) && !isset($event['event_timestamp'])) {
+                $event['event_timestamp'] = $event['timestamp'];
+                unset($event['timestamp']);
+            }
+            $producer->send(self::TOPIC, json_encode($event));
+        }
+
         $producer->close();
     }
 
-    /**
-     * Consume (dequeue) events from Kafka topic.
-     * Returns array of events, or null if no messages available.
-     * This is what the worker calls.
-     */
     public function dequeue(): ?array
     {
         $config = new ConsumerConfig();
